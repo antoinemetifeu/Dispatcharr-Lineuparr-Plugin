@@ -768,7 +768,7 @@ class FuzzyMatcher:
         return None, 0, None
 
     def match_all_streams(self, lineup_name, candidate_names, alias_map, channel_number=None,
-                          user_ignored_tags=None, lineup_country=None):
+                          user_ignored_tags=None, lineup_country=None, blocked_streams=None):
         """
         Full matching pipeline for Lineuparr: alias → exact → substring → fuzzy, with number boost.
         Returns ALL matching streams sorted by score.
@@ -779,6 +779,9 @@ class FuzzyMatcher:
             alias_map: Alias dict
             channel_number: Expected channel number for boost
             user_ignored_tags: Tags to strip
+            blocked_streams: List of stream name patterns (normalized, provider prefix stripped)
+                that must never match this channel — e.g. ["TF1 4K HDR"] blocks all
+                "FR - TF1 4K HDR", "FR: TF1 4K HDR" etc.
 
         Returns:
             List of (stream_name, score, match_type) tuples sorted by score desc.
@@ -788,6 +791,21 @@ class FuzzyMatcher:
 
         if user_ignored_tags is None:
             user_ignored_tags = []
+
+        # Blocked stream filtering: remove streams whose normalized name matches
+        # any entry in blocked_streams before all other matching stages.
+        if blocked_streams:
+            norm_blocked = {
+                self.normalize_name(b, ignore_quality=False).lower()
+                for b in blocked_streams
+                if self.normalize_name(b, ignore_quality=False)
+            }
+            candidate_names = [
+                c for c in candidate_names
+                if (self.normalize_name(c, ignore_quality=False) or "").lower() not in norm_blocked
+            ]
+            if not candidate_names:
+                return []
 
         # Callsign anchor (asymmetric): extract the lineup channel's US
         # broadcast callsign up front. Used after the fuzzy stages to floor

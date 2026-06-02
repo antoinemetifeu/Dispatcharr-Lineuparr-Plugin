@@ -19,6 +19,7 @@ from django.db import transaction
 
 from .fuzzy_matcher import FuzzyMatcher
 from .aliases import CHANNEL_ALIASES
+from .blocked_streams import CHANNEL_BLOCKED_STREAMS
 from .progress_status import save_progress_atomic, load_progress, build_status_message
 
 from apps.channels.models import Channel, ChannelGroup, ChannelProfile, ChannelProfileMembership, ChannelStream, Stream
@@ -466,6 +467,19 @@ class Plugin:
                 "placeholder": "{\"Channel Name\": [\"alias 1\", \"alias 2\"]}",
                 "help_text": "JSON object mapping a lineup channel name to extra alias names (a bare string is accepted as a single alias). Leave blank to use built-in aliases only.",
             },
+            {
+                "id": "custom_blocked_streams",
+                "label": "Custom Blocked Streams (advanced)",
+                "type": "text",
+                "default": "",
+                "placeholder": "{\"M6 UHD\": [\"M6 4K Event\"], \"TF1 UHD\": [\"TF1 4K HDR\"]}",
+                "help_text": (
+                    "JSON object mapping a lineup channel name to stream name patterns that "
+                    "should never match it. Patterns are matched by normalized name (provider "
+                    "prefix stripped) so \"TF1 4K HDR\" blocks \"FR - TF1 4K HDR\", "
+                    "\"FR: TF1 4K HDR\" etc. Merged on top of built-in blocked streams."
+                ),
+            },
             # --- Section: Advanced ---
             {
                 "id": "_sec_advanced",
@@ -874,6 +888,35 @@ class Plugin:
                 )
 
         return alias_map
+
+    def _build_blocked_map(self, settings, logger):
+        """Merge built-in blocked streams with user custom_blocked_streams."""
+        blocked_map = {k: list(v) for k, v in CHANNEL_BLOCKED_STREAMS.items()}
+
+        custom_str = _clean_json_text(settings.get("custom_blocked_streams") or "")
+        if custom_str:
+            try:
+                custom = json.loads(custom_str)
+            except json.JSONDecodeError as e:
+                logger.warning(f"{LOG_PREFIX} Failed to parse custom_blocked_streams JSON: {e}")
+                custom = None
+
+            if isinstance(custom, dict):
+                for k, v in custom.items():
+                    if isinstance(v, str):
+                        entries = [v]
+                    elif isinstance(v, list):
+                        entries = [a.strip() for a in v if isinstance(a, str) and a.strip()]
+                    else:
+                        continue
+                    if k in blocked_map:
+                        blocked_map[k] = list(dict.fromkeys(blocked_map[k] + entries))
+                    else:
+                        blocked_map[k] = entries
+            elif custom is not None:
+                logger.warning(f"{LOG_PREFIX} custom_blocked_streams must be a JSON object — ignored")
+
+        return blocked_map
 
     def _get_filtered_epg_data(self, settings, logger):
         """Fetch EPG data, optionally filtered and prioritized by selected sources."""
@@ -1479,6 +1522,7 @@ class Plugin:
                 return lineup
             matcher = self._init_fuzzy_matcher(settings, logger)
             alias_map = self._build_alias_map(settings, logger)
+            blocked_map = self._build_blocked_map(settings, logger)
             streams = self._get_all_streams(settings, logger)
             assigner = self._init_assigner_state(settings)
             lineup_cc, _ = self._parse_lineup_filename(settings.get("lineup_file", ""))
@@ -1526,6 +1570,7 @@ class Plugin:
                         ch_name, unique_stream_names, alias_map,
                         channel_number=boost_number,
                         lineup_country=lineup_cc,
+                        blocked_streams=blocked_map.get(ch_name),
                     )
 
                     if matches:
@@ -2146,6 +2191,7 @@ class Plugin:
             prefix = self._get_group_prefix(settings, lineup)
             matcher = self._init_fuzzy_matcher(settings, logger)
             alias_map = self._build_alias_map(settings, logger)
+            blocked_map = self._build_blocked_map(settings, logger)
             rate_limiter = SmartRateLimiter(settings.get("rate_limiting", PluginConfig.DEFAULT_RATE_LIMITING))
             lineup_cc, _ = self._parse_lineup_filename(settings.get("lineup_file", ""))
             if lineup_cc:
@@ -2214,6 +2260,7 @@ class Plugin:
                         ch_name, unique_stream_names, alias_map,
                         channel_number=ch_number,
                         lineup_country=lineup_cc,
+                        blocked_streams=blocked_map.get(ch_name),
                     )
 
                     if matches:
